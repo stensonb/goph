@@ -6,9 +6,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"os"
+	gouser "os/user"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -37,27 +40,34 @@ import (
 //
 
 var (
-	err        error
-	auth       goph.Auth
-	client     *goph.Client
-	addr       string
-	user       string
-	port       uint
-	key        string
-	cmd        string
-	pass       bool
-	passphrase bool
-	timeout    time.Duration
-	agent      bool
-	sftpc      *sftp.Client
+	err              error
+	auth             goph.Auth
+	client           *goph.Client
+	addr             string
+	user             string
+	port             uint
+	key              string
+	signedCertSuffix string
+	cmd              string
+	pass             bool
+	passphrase       bool
+	timeout          time.Duration
+	agent            bool
+	sftpc            *sftp.Client
 )
 
 func init() {
+	usr, err := gouser.Current()
+	if err != nil {
+		fmt.Println("couldn't determine current user.  defaulting to 'root'")
+		usr.Username = "root"
+	}
 
 	flag.StringVar(&addr, "ip", "127.0.0.1", "machine ip address.")
-	flag.StringVar(&user, "user", "root", "ssh user.")
+	flag.StringVar(&user, "user", usr.Username, "ssh user.")
 	flag.UintVar(&port, "port", 22, "ssh port number.")
-	flag.StringVar(&key, "key", strings.Join([]string{os.Getenv("HOME"), ".ssh", "id_rsa"}, "/"), "private key path.")
+	flag.StringVar(&key, "key", filepath.Join(os.Getenv("HOME"), ".ssh", "id_rsa"), "private key path.")
+	flag.StringVar(&signedCertSuffix, "signedCertSuffix", "-cert.pub", "signed cert path.")
 	flag.StringVar(&cmd, "cmd", "", "command to run.")
 	flag.BoolVar(&pass, "pass", false, "ask for ssh password instead of private key.")
 	flag.BoolVar(&agent, "agent", false, "use ssh agent for authentication (unix systems only).")
@@ -107,19 +117,22 @@ func main() {
 
 	var err error
 
-	if agent || goph.HasAgent() {
-
-		auth, err = goph.UseAgent()
-
-	} else if pass {
-
-		auth = goph.Password(askPass("Enter SSH Password: "))
-
-	} else {
-
-		auth, err = goph.Key(key, getPassphrase(passphrase))
+	keySigner, err := goph.GetSigner(key, getPassphrase(passphrase))
+	if err != nil {
+		panic(err)
 	}
 
+	cert, err := ioutil.ReadFile(fmt.Sprintf("%s%s", key, signedCertSuffix))
+	if err != nil {
+		panic(err)
+	}
+
+	pk, _, _, _, err := ssh.ParseAuthorizedKey(cert)
+	if err != nil {
+		panic(err)
+	}
+
+	certSigner, err := ssh.NewCertSigner(pk.(*ssh.Certificate), keySigner)
 	if err != nil {
 		panic(err)
 	}
@@ -128,7 +141,7 @@ func main() {
 		User:     user,
 		Addr:     addr,
 		Port:     port,
-		Auth:     auth,
+		Auth:     []ssh.AuthMethod{ssh.PublicKeys(certSigner)},
 		Callback: VerifyHost,
 	})
 
